@@ -1,0 +1,64 @@
+import os
+import gradio as gr
+import google.generativeai as genai
+from dotenv import load_dotenv, find_dotenv
+from typing import List
+
+# Load environment variables
+load_dotenv(find_dotenv())
+
+# Configure Gemini API
+genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+
+# Initialize the model (make sure to specify the model name like "gemini-pro")
+model = genai.GenerativeModel()
+
+# Handle user input and append it to chatbot state
+def handle_user_query(msg, chatbot):
+    print(msg, chatbot)
+    chatbot = chatbot + [[msg, None]]
+    return '', chatbot
+
+# Format previous chat messages to Gemini format
+def generate_chatbot(chatbot: List[List[str]]) -> List[dict]:
+    formatted_chatbot = []
+    for ch in chatbot:
+        if ch[0] is not None:
+            formatted_chatbot.append({"role": "user", "parts": [ch[0]]})
+        if ch[1] is not None:
+            formatted_chatbot.append({"role": "model", "parts": [ch[1]]})
+    return formatted_chatbot
+
+# Call Gemini model and update the response
+def handle_gemini_response(chatbot):
+    query = chatbot[-1][0]
+    formatted_chatbot = generate_chatbot(chatbot[:-1])  # exclude the last pair
+    chat = model.start_chat(history=formatted_chatbot)
+    response = chat.send_message(query)
+    chatbot[-1][1] = response.text  # model's reply
+    return chatbot
+
+# Gradio UI
+with gr.Blocks() as demo:
+    chatbot = gr.Chatbot(
+        label="Chat with Gemini",
+        bubble_full_width=False
+    )
+
+    msg = gr.Textbox(placeholder="Type your message here...")
+
+    clear = gr.ClearButton([msg, chatbot])
+
+    msg.submit(
+        handle_user_query,
+        inputs=[msg, chatbot],
+        outputs=[msg, chatbot]
+    ).then(
+        handle_gemini_response,
+        inputs=[chatbot],
+        outputs=[chatbot]
+    )
+
+if __name__ == "__main__":
+    demo.queue()
+    demo.launch()
