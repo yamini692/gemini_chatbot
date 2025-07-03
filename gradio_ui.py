@@ -2,63 +2,56 @@ import os
 import gradio as gr
 import google.generativeai as genai
 from dotenv import load_dotenv, find_dotenv
-from typing import List
+from langchain_community.tools.tavily_search.tool import TavilySearchResults
 
-# Load environment variables
+# === Load environment variables ===
 load_dotenv(find_dotenv())
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-# Configure Gemini API
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+# === Setup Gemini ===
+genai.configure(api_key=GEMINI_API_KEY)
+model = genai.GenerativeModel("models/gemini-1.5-flash")
 
-# Initialize the model (make sure to specify the model name like "gemini-pro")
-model = genai.GenerativeModel()
+# === Setup Tavily tool ===
+tavily = TavilySearchResults(tavily_api_key=TAVILY_API_KEY)
 
-# Handle user input and append it to chatbot state
-def handle_user_query(msg, chatbot):
-    print(msg, chatbot)
-    chatbot = chatbot + [[msg, None]]
-    return '', chatbot
+# === Response logic ===
+def respond(query, history):
+    # Decide when to use Tavily
+    if "weather" in query.lower() or "search" in query.lower():
+        try:
+            result = tavily.invoke({"query": query})
+            # Format Tavily result into a readable string
+            if isinstance(result, dict):
+                result = f"{result.get('title', '')} (score: {result.get('score', '')})"
+            elif isinstance(result, list):
+                result = "\n".join([str(item) for item in result])
+            else:
+                result = str(result)
+            return history + [(query, result)]
+        except Exception as e:
+            return history + [(query, f"[Tavily Error] {str(e)}")]
+    else:
+        try:
+            response = model.generate_content(query)
+            return history + [(query, response.text)]
+        except Exception as e:
+            return history + [(query, f"[Gemini Error] {str(e)}")]
 
-# Format previous chat messages to Gemini format
-def generate_chatbot(chatbot: List[List[str]]) -> List[dict]:
-    formatted_chatbot = []
-    for ch in chatbot:
-        if ch[0] is not None:
-            formatted_chatbot.append({"role": "user", "parts": [ch[0]]})
-        if ch[1] is not None:
-            formatted_chatbot.append({"role": "model", "parts": [ch[1]]})
-    return formatted_chatbot
-
-# Call Gemini model and update the response
-def handle_gemini_response(chatbot):
-    query = chatbot[-1][0]
-    formatted_chatbot = generate_chatbot(chatbot[:-1])  # exclude the last pair
-    chat = model.start_chat(history=formatted_chatbot)
-    response = chat.send_message(query)
-    chatbot[-1][1] = response.text  # model's reply
-    return chatbot
-
-# Gradio UI
+# === Gradio UI ===
 with gr.Blocks() as demo:
-    chatbot = gr.Chatbot(
-        label="Chat with Gemini",
-        bubble_full_width=False
-    )
-
-    msg = gr.Textbox(placeholder="Type your message here...")
-
+    chatbot = gr.Chatbot(label="Gemini + Tavily Agent")
+    msg = gr.Textbox(placeholder="Ask anything... like 'What's the weather in Chennai?'", label="Your Message")
     clear = gr.ClearButton([msg, chatbot])
 
     msg.submit(
-        handle_user_query,
+        fn=respond,
         inputs=[msg, chatbot],
-        outputs=[msg, chatbot]
-    ).then(
-        handle_gemini_response,
-        inputs=[chatbot],
         outputs=[chatbot]
     )
 
+# === Run app ===
 if __name__ == "__main__":
     demo.queue()
-    demo.launch()
+    demo.launch(share=True)
