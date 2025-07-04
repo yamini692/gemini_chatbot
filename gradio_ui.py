@@ -80,6 +80,7 @@ Avoid repeating values. Do not add emojis. Be helpful and natural.
     except Exception as e:
         return f"Error generating reply: {str(e)}"
 
+# --- Gradio Chat Logic ---
 def handle_user_query(msg, chatbot):
     chatbot = chatbot + [[msg, None]]
     return '', chatbot
@@ -106,9 +107,9 @@ def handle_gemini_response(chatbot):
     chatbot[-1][1] = answer
     return chatbot
 
-
+# --- Gradio UI ---
 with gr.Blocks() as demo:
-    gr.Markdown("Tetris-Bot")
+    gr.Markdown("## 🌤️ Gemini Chat + 50-word Weather Summary Bot")
     chatbot = gr.Chatbot(label="Chat History", bubble_full_width=False)
     msg = gr.Textbox(placeholder="Ask about weather or anything...")
 
