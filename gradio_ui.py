@@ -1,43 +1,57 @@
 import os
 import re
-import json
 import requests
 import gradio as gr
-import google.generativeai as genai
-from dotenv import load_dotenv, find_dotenv
 from datetime import datetime
-from typing import List, Literal
+from typing import Literal
+from dotenv import load_dotenv, find_dotenv
+import random
 
-# --- Load & Configure ---
+# Load and set API keys
 load_dotenv(find_dotenv())
-GOOGLE_API_KEY = os.getenv("GEMINI_API_KEY")
-WEATHER_API_KEY = "e9283ae8b8a9a837c00c30344d383ed6"
+os.environ["GOOGLE_API_KEY"] = os.getenv("GEMINI_API_KEY")
+os.environ["WEATHER_API_KEY"] = os.getenv("WEATHER_API_KEY")
 
-genai.configure(api_key=GOOGLE_API_KEY)
-model = genai.GenerativeModel("gemini-1.5-flash")
+# Configure Gemini
+import google.generativeai as genai
+genai.configure(api_key=os.environ["GOOGLE_API_KEY"])
+model = genai.GenerativeModel("gemini-2.5-flash")
 
-# --- Weather Logic ---
+# LangChain setup
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain.agents import Tool, initialize_agent
+from langchain.agents.agent_types import AgentType
+
+llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.5)
+
+
 def get_weather(location: str, unit: Literal["celsius", "fahrenheit"] = "celsius"):
-    url = "https://api.openweathermap.org/data/2.5/weather"
+    base_url = "http://api.weatherapi.com/v1/current.json"
+    api_key = os.environ["WEATHER_API_KEY"]
+
     params = {
+        "key": api_key,
         "q": location,
-        "appid": WEATHER_API_KEY,
-        "units": "metric" if unit == "celsius" else "imperial"
+        "aqi": "no"
     }
 
     try:
-        response = requests.get(url, params=params, timeout=5)
+        response = requests.get(base_url, params=params, timeout=5)
         data = response.json()
 
-        if response.status_code != 200:
-            return {"error": data.get("message", "Unknown error")}
+        if "error" in data:
+            return {"error": data["error"]["message"]}
 
+        current = data["current"]
+        location_name = data["location"]["name"]
+
+        temp = current["temp_c"] if unit == "celsius" else current["temp_f"]
         return {
-            "city": data["name"],
-            "temperature": data["main"]["temp"],
-            "humidity": data["main"]["humidity"],
-            "condition": data["weather"][0]["description"],
-            "wind_speed": data["wind"]["speed"],
+            "city": location_name,
+            "temperature": temp,
+            "humidity": current["humidity"],
+            "condition": current["condition"]["text"],
+            "wind_speed": current["wind_kph"],
             "unit": unit,
             "timestamp": datetime.now().isoformat()
         }
@@ -45,86 +59,80 @@ def get_weather(location: str, unit: Literal["celsius", "fahrenheit"] = "celsius
     except Exception as e:
         return {"error": str(e)}
 
+# Wrap weather response
+def weather_tool_wrapper(city: str) -> str:
+    data = get_weather(city)
+    if "error" in data:
+        return f"Error: {data['error']}"
+    dt = datetime.now().strftime("%B %d, %Y at %I:%M %p")
+
+    responses = [
+    f"As of {dt}, in {data['city']} the weather is {data['condition']}. The temperature is about {data['temperature']}°{'C' if data['unit']=='celsius' else 'F'}, with humidity at {data['humidity']}% and wind speed reaching {data['wind_speed']} kph. Stay prepared.",
+
+    f"Right now in {data['city']} ({dt}), it feels like {data['condition']}. Temperature is {data['temperature']}°{data['unit'][0].upper()}, wind blowing at {data['wind_speed']} kph, and humidity stands at {data['humidity']}%. Plan your outdoor activities accordingly and stay weather-aware.",
+
+    f"Here's your {dt} weather report for {data['city']}: Expect {data['condition']} with a temperature of {data['temperature']}°{data['unit'][0].upper()}, wind speeds around {data['wind_speed']} kph, and {data['humidity']}% humidity. Dress accordingly and stay hydrated throughout the day."
+]
+
+
+    return random.choice(responses)
+
+# Register tool & agent
+weather_tool = Tool(
+    name="WeatherTool",
+    func=weather_tool_wrapper,
+    description="Get current weather by city name."
+)
+
+agent = initialize_agent(
+    tools=[weather_tool],
+    llm=llm,
+    agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
+    handle_parsing_errors=True,
+    verbose=False
+)
+
+# Extract city name using Gemini
 def extract_location(query: str) -> str:
-    location_prompt = f"Extract the city or country name only from this query: {query}. Just return the city name."
+    prompt = f"Extract the city name from: {query}"
     try:
-        loc_response = model.generate_content(location_prompt)
-        raw = loc_response.text.strip().strip(".")
-        return re.sub(r"\(.*?\)", "", raw).strip()
+        txt = model.generate_content(prompt).text.strip().strip(".")
+        return re.sub(r"\(.*?\)", "", txt).strip()
     except:
-        return "your location"
+        return query
 
-def process_weather_query(query: str) -> str:
-    location = extract_location(query)
-    unit = "fahrenheit" if "fahrenheit" in query.lower() else "celsius"
+# Smart reply using LangChain + Gemini
+def smart_reply_gradio(query, chat_history):
+    chat_history.append((query, "Thinking..."))
+    yield "", chat_history
 
-    weather = get_weather(location, unit)
-
-    if "error" in weather:
-        return f"Could not fetch weather for {location}. Reason: {weather['error']}"
-
-    summary_prompt = f"""
-User query: '{query}'
-
-Weather data:
-{json.dumps(weather, indent=2)}
-
-Write a user-friendly weather report in **exactly 50 words**. 
-Include city name, temperature (in {unit}), condition, humidity, and wind speed.
-Avoid repeating values. Do not add emojis. Be helpful and natural.
-"""
+    lower = query.lower()
+    weather_keywords = ['weather', 'forecast', 'climate', 'temperature', 'humidity', 'wind']
 
     try:
-        reply = model.generate_content(summary_prompt)
-        return reply.text.strip()
+        if any(w in lower for w in weather_keywords):
+            city = extract_location(query)
+            response = agent.run(f"What is the weather in {city}?")
+        else:
+            response = model.generate_content(query).text.strip()
     except Exception as e:
-        return f"Error generating reply: {str(e)}"
+        response = f"Error: {str(e)}"
 
-# --- Gradio Chat Logic ---
-def handle_user_query(msg, chatbot):
-    chatbot = chatbot + [[msg, None]]
-    return '', chatbot
+    chat_history[-1] = (query, response)
+    yield "", chat_history
 
-def generate_chatbot(chatbot: List[List[str]]) -> List[dict]:
-    formatted = []
-    for ch in chatbot:
-        if ch[0]: formatted.append({"role": "user", "parts": [ch[0]]})
-        if ch[1]: formatted.append({"role": "model", "parts": [ch[1]]})
-    return formatted
 
-def handle_gemini_response(chatbot):
-    query = chatbot[-1][0]
-    formatted_chatbot = generate_chatbot(chatbot[:-1])
-
-    weather_keywords = ['weather', 'temperature', 'forecast', 'humidity', 'wind', 'climate']
-    if any(word in query.lower() for word in weather_keywords):
-        answer = process_weather_query(query)
-    else:
-        chat = model.start_chat(history=formatted_chatbot)
-        response = chat.send_message(query)
-        answer = response.text.strip()
-
-    chatbot[-1][1] = answer
-    return chatbot
-
-# --- Gradio UI ---
 with gr.Blocks() as demo:
-    gr.Markdown("## 🌤️ Gemini Chat + 50-word Weather Summary Bot")
-    chatbot = gr.Chatbot(label="Chat History", bubble_full_width=False)
-    msg = gr.Textbox(placeholder="Ask about weather or anything...")
-
-    clear = gr.ClearButton([msg, chatbot])
-
-    msg.submit(
-        handle_user_query,
-        inputs=[msg, chatbot],
-        outputs=[msg, chatbot]
-    ).then(
-        handle_gemini_response,
-        inputs=[chatbot],
-        outputs=[chatbot]
+    gr.Markdown("Gemini Weather Assistant")
+    chatbot = gr.Chatbot(label="YazBot")
+    user_msg = gr.Textbox(placeholder="Ask about weather or anything...")
+    gr.ClearButton([chatbot, user_msg])
+    user_msg.submit(
+        smart_reply_gradio,
+        inputs=[user_msg, chatbot],
+        outputs=[user_msg, chatbot],
+        queue=True
     )
 
-if __name__ == "__main__":
-    demo.queue()
-    demo.launch()
+# Launch
+demo.launch()
